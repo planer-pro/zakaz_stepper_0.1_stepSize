@@ -41,21 +41,20 @@ float speedRpm = MIN_SPEED;        // Текущая/начальная скор
 uint32_t stepDelayUs = 0;          // Задержка между шагами в микросекундах
 volatile uint32_t accum_1S = 0;    // Используется для накопления прерываний
 bool updDisplayFlag = false;       // Флаг обновления дисплея
+String strRpm = String(speedRpm, 1);
 
 EncButton eb(ENCA_PIN, ENCB_PIN, MENU_ENC_PIN);
 Button sb(START_BTN_PIN);
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-void Handle_Eb();
-void Handle_Sb();
+void HandleEncoder();
+void HandleStartButton();
 void updateDisplayHandle();
 void UpdateLcdDisplay();
-void CheckInputLimits(float inpSpeed);
 void CalculateIsrDelay();
 void initISR();
 void MakeStep();
-void MakeISR();
-void RiseTimer_1s();
+void CollectISR_1s();
 void SetMotorFreeze(bool freeze);
 void DisplaySerialDebugData();
 void FraseInMiddlePos(uint8_t posY, String frase);
@@ -115,23 +114,21 @@ void loop()
     eb.tick();
     sb.tick();
 
-    Handle_Eb();
-    Handle_Sb();
+    HandleEncoder();
+    HandleStartButton();
 }
 
-void Handle_Eb()
+void HandleEncoder()
 {
-    if (eb.turn())
+    if (eb.turn() && displayMode == set_mode) // игнорируем если не в режиме настройки
     {
-        if (displayMode != set_mode) // игнорируем если не в режиме настройки
-            return;
+        speedRpm += (eb.dir() > 0) ? 0.1 : -0.1;
+        speedRpm = constrain(speedRpm, MIN_SPEED, MAX_SPEED);
 
-        if (eb.dir() > 0)
-            speedRpm += 0.1;
-        else if (eb.dir() < 0)
-            speedRpm -= 0.1;
+        CalculateIsrDelay();
+        DisplaySerialDebugData();
 
-        CheckInputLimits(speedRpm);
+        updDisplayFlag = true;
     }
 
     if (eb.click())
@@ -142,6 +139,8 @@ void Handle_Eb()
         if (displayMode == set_mode)
         {
             displayMode = loaded_mode;
+
+            SaveEEPROM(); // сохраняем новые настройки
 
             Serial.println("Enter loaded mode");
         }
@@ -158,9 +157,9 @@ void Handle_Eb()
     }
 }
 
-void Handle_Sb()
+void HandleStartButton()
 {
-    if (displayMode == set_mode) // игнорируем в режиме настройки
+    if (displayMode == set_mode) // игнорируем в режим настройки
         return;
 
     if (sb.click())
@@ -170,11 +169,9 @@ void Handle_Sb()
 
         if (displayMode == loaded_mode)
         {
-            SaveEEPROM();
-
             SetMotorFreeze(true); // включаем мотор для работы
 
-            Timer1.restart();
+            Timer1.start();
 
             displayMode = work_mode;
 
@@ -191,10 +188,7 @@ void Handle_Sb()
             Serial.println("Enter loaded mode");
         }
 
-        tmS = 0;
-        tmH = 0;
-        tmM = 0;
-        tmD = 0;
+        tmS = tmM = tmH = tmD = 0;
 
         lcd.clear();
 
@@ -232,28 +226,12 @@ void Handle_Sb()
     }
 }
 
-void CheckInputLimits(float inpSpeed)
+void SetMotorFreeze(bool freeze)
 {
-
-    if (inpSpeed < MIN_SPEED)
-    {
-        Serial.println("Corrected to min: out of range from 0.1 to 6.0 rpm");
-
-        inpSpeed = MIN_SPEED;
-    }
-    else if (inpSpeed > MAX_SPEED)
-    {
-        Serial.println("Corrected to max: out of range from 0.1 to 6.0 rpm");
-
-        inpSpeed = MAX_SPEED;
-    }
-
-    speedRpm = inpSpeed;
-
-    CalculateIsrDelay();
-    DisplaySerialDebugData();
-
-    updDisplayFlag = true;
+    if (freeze)
+        digitalWrite(EN_STEPPER_PIN, LOW);
+    else
+        digitalWrite(EN_STEPPER_PIN, HIGH);
 }
 
 void CalculateIsrDelay()
@@ -272,48 +250,26 @@ void initISR()
 
 void MakeStep()
 {
+    // Делаем шаг
     digitalWrite(STEP_PIN, HIGH);
     delayMicroseconds(1);
     digitalWrite(STEP_PIN, LOW);
 
-    MakeISR();
+    CollectISR_1s();
 }
 
-void MakeISR()
+void CollectISR_1s()
 {
     accum_1S += stepDelayUs;
 
     if (accum_1S >= 1000000)
     {
-        RiseTimer_1s();
+        tmS++;
+
+        updDisplayFlag = true;
 
         accum_1S -= 1000000;
     }
-}
-
-void RiseTimer_1s()
-{
-    tmS++;
-    updDisplayFlag = true;
-}
-
-void SetMotorFreeze(bool freeze)
-{
-    if (freeze)
-        digitalWrite(EN_STEPPER_PIN, LOW);
-    else
-        digitalWrite(EN_STEPPER_PIN, HIGH);
-}
-
-void DisplaySerialDebugData()
-{
-    Serial.println("Debug data:");
-    Serial.print("Step delay: ");
-    Serial.print(stepDelayUs);
-    Serial.println(" us");
-    Serial.print("Speed set to: ");
-    Serial.print(speedRpm);
-    Serial.println(" rpm");
 }
 
 void updateDisplayHandle()
@@ -328,17 +284,19 @@ void updateDisplayHandle()
 
 void UpdateLcdDisplay()
 {
+    strRpm = String(speedRpm, 1);
+
     switch (displayMode)
     {
     case set_mode:
         FraseInMiddlePos(0, "SETUP RPM:");
-        FraseInMiddlePos(1, "New RPM:>" + (String)speedRpm + "<");
+        FraseInMiddlePos(1, "New RPM: >" + strRpm + "<");
         FraseInMiddlePos(2, "Rotate ENC to ADJUST");
         FraseInMiddlePos(3, "Press ENC to LOAD");
 
         break;
     case loaded_mode:
-        FraseInMiddlePos(0, "LOADED RPM: " + (String)speedRpm);
+        FraseInMiddlePos(0, "LOAD RPM:" + strRpm);
         FraseInMiddlePos(1, "Ready to START");
         FraseInMiddlePos(2, "Press ENC to SETUP");
         FraseInMiddlePos(3, "Press BTN to START");
@@ -348,19 +306,16 @@ void UpdateLcdDisplay()
         if (tmS >= 60) // переводим во время
         {
             tmS = 0;
-            tmM++;
 
-            if (tmM >= 60)
+            if (++tmM >= 60)
             {
                 tmM = 0;
-                tmH++;
 
-                if (tmH >= 24)
+                if (++tmH >= 24)
                 {
                     tmH = 0;
-                    tmD++;
 
-                    if (tmD > MAX_TIME_H)
+                    if (++tmD > MAX_TIME_H)
                         tmD = 0;
                 }
             }
@@ -369,14 +324,14 @@ void UpdateLcdDisplay()
         }
 
         FraseInMiddlePos(0, "WORK: " + (String)tmD + "d " + (String)tmH + ":" + (String)tmM + ":" + (String)tmS);
-        FraseInMiddlePos(1, "RPM = " + (String)speedRpm);
+        FraseInMiddlePos(1, "RPM = " + strRpm);
         FraseInMiddlePos(2, "Hold BTN to PAUSE");
         FraseInMiddlePos(3, "Press BTN to STOP");
 
         break;
     case pause_mode:
         FraseInMiddlePos(0, "PAUSE");
-        FraseInMiddlePos(1, "RPM = " + (String)speedRpm);
+        FraseInMiddlePos(1, "RPM = " + strRpm);
 
         FraseInMiddlePos(2, "Time: " + (String)tmD + "d " + (String)tmH + ":" + (String)tmM + ":" + (String)tmS);
         FraseInMiddlePos(3, "Hold BTN to RESUME");
@@ -393,22 +348,33 @@ void FraseInMiddlePos(uint8_t posY, String frase)
     lcd.print(frase);
 }
 
+void DisplaySerialDebugData()
+{
+    Serial.println("Debug data:");
+    Serial.print("Step delay: ");
+    Serial.print(stepDelayUs);
+    Serial.println(" us");
+    Serial.print("Speed set to: ");
+    Serial.print(speedRpm);
+    Serial.println(" rpm");
+}
+
 void SaveEEPROM()
 {
     EEPROM.put(0, speedRpm);
 
     delay(10);
 
-    Serial.println("Save EEPROM data: " + (String)speedRpm);
+    Serial.println("Save EEPROM data: " + strRpm);
 }
 
 void LoadEEPROM()
 {
     EEPROM.get(0, speedRpm);
 
-    delay(10);
+    delay(5);
 
-    Serial.println("Load EEPROM data: " + (String)speedRpm);
+    Serial.println("Load EEPROM data: " + strRpm);
 }
 
 void DisplayIntro()
