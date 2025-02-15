@@ -126,9 +126,12 @@ void HandleEncoder()
         speedRpm = constrain(speedRpm, MIN_SPEED, MAX_SPEED);
 
         CalculateIsrDelay();
-        DisplaySerialDebugData();
 
-        updDisplayFlag = true;
+        if (speedRpm > 0.1 && speedRpm < 6.0) // работать только в разрешенном диапазоне
+        {
+            updDisplayFlag = true;
+            DisplaySerialDebugData();
+        }
     }
 
     if (eb.click())
