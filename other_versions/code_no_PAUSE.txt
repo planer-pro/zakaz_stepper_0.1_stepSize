@@ -1,0 +1,375 @@
+#include <Arduino.h>
+#include <EncButton.h>
+#include <LiquidCrystal_I2C.h>
+#include <TimerOne.h>
+#include <EEPROM.h>
+
+enum
+{
+    ccw,
+    cw
+};
+
+enum
+{
+    set_mode,
+    loaded_mode,
+    work_mode
+};
+
+#define START_BTN_PIN 8 // Пин для кнопки START
+#define MENU_ENC_PIN 6  // Пин для кнопки ENC
+#define ENCA_PIN 5      // Пин ENCA
+#define ENCB_PIN 4      // Пин ENCB
+
+#define EN_STEPPER_PIN 7       // Пин для включения шагового двигателя
+#define STEP_PIN 2             // Пин шага
+#define DIR_PIN 3              // Пин направления
+#define STEPS_PER_REV 200 * 16 // 3200 шагов/оборот (для микрошага 1/16)
+#define MIN_SPEED 0.1          // Минимальная скорость в об/мин
+#define MAX_SPEED 6.0          // Максимальная скорость в об/мин
+#define MAX_TIME_H 9999        // Максимальное время в часах
+#define MOTOR_DIRECTION cw     // Направление вращения по часовой стрелке
+#define DEB_TIMEOUT 100        // Таймаут дебаунса в миллисекундах
+
+uint8_t displayMode = loaded_mode;              // Начальный режим отображения
+int timerTime1s = 0, tmH = 0, tmM = 0, tmD = 0; // Таймерные переменные пройденного времени
+char buffer[20];                                // буфер для отображения времени
+float speedRpm = MIN_SPEED;                     // Текущая/начальная скорость (об/мин)
+uint32_t stepDelayUs = 0;                       // Задержка между шагами в микросекундах
+volatile uint32_t accumulator = 0;              // Используется для обработки прерываний для секундного таймера
+bool updDisplayFlag = false;
+
+EncButton eb(ENCA_PIN, ENCB_PIN, MENU_ENC_PIN);
+Button sb(START_BTN_PIN);
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+void DisplayIntro();
+void Handle_Eb();
+void Handle_Sb();
+void UpdateLcdDisplay();
+void updateDisplayHandle();
+void UpdateFrase(uint8_t posY, String frase);
+void SetMotorIsrDelay();
+void MakeStep();
+void MakeISR();
+void CheckInputLimits(float inpSpeed);
+void EnableMotor(bool state);
+void DisplaySerialDebugData();
+void SaveEEPROM();
+void LoadEEPROM();
+
+void setup()
+{
+    Serial.begin(115200);
+    Serial.println();
+
+    EEPROM.begin();
+    delay(10);
+
+    LoadEEPROM();
+
+    while (isnan(speedRpm)) // проверяем наличие данных в EEPROM (первый запуск)
+    {
+        speedRpm = 0.1;
+
+        SaveEEPROM();
+    }
+
+    lcd.init();
+    lcd.backlight();
+
+    pinMode(STEP_PIN, OUTPUT);
+    pinMode(DIR_PIN, OUTPUT);
+    pinMode(EN_STEPPER_PIN, OUTPUT);
+    pinMode(LED_BUILTIN, OUTPUT);
+
+    digitalWrite(DIR_PIN, MOTOR_DIRECTION); // Направление вращения мотора
+
+    eb.setDebTimeout(DEB_TIMEOUT);
+    sb.setDebTimeout(DEB_TIMEOUT);
+
+    DisplayIntro();
+
+    SetMotorIsrDelay(); // Калькуляция задержки шага
+
+    Serial.println();
+    Serial.println("Welcome");
+
+    DisplaySerialDebugData();
+
+    updDisplayFlag = true;
+}
+
+void loop()
+{
+    updateDisplayHandle();
+
+    eb.tick();
+    sb.tick();
+
+    Handle_Eb();
+    Handle_Sb();
+}
+
+void Handle_Eb()
+{
+    if (eb.turn())
+    {
+        if (displayMode != set_mode) // игнорируем если не в режиме настройки
+            return;
+
+        if (eb.dir() > 0)
+            eb.fast() ? speedRpm += 1.0 : speedRpm += 0.1;
+        else if (eb.dir() < 0)
+            eb.fast() ? speedRpm -= 1.0 : speedRpm -= 0.1;
+
+        CheckInputLimits(speedRpm);
+    }
+
+    if (eb.click())
+    {
+        if (displayMode == work_mode) // игнорируем в режиме работы
+            return;
+
+        if (displayMode == set_mode)
+        {
+            displayMode = loaded_mode;
+
+            Serial.println("Enter loaded mode");
+        }
+        else if (displayMode == loaded_mode)
+        {
+            displayMode = set_mode;
+
+            Serial.println("Enter setup mode");
+        }
+
+        lcd.clear();
+
+        updDisplayFlag = true;
+    }
+}
+
+void Handle_Sb()
+{
+    if (displayMode == set_mode) // игнорируем в режиме настройки
+        return;
+
+    if (sb.click())
+    {
+        if (displayMode == loaded_mode)
+        {
+            SaveEEPROM();
+
+            EnableMotor(true); // включаем мотор для работы
+
+            Timer1.restart();
+
+            displayMode = work_mode;
+
+            Serial.println("Enter work mode");
+        }
+        else if (displayMode == work_mode)
+        {
+            Timer1.stop();
+
+            EnableMotor(false); // выключаем мотор для остановки
+
+            displayMode = loaded_mode;
+
+            Serial.println("Enter loaded mode");
+        }
+
+        tmD = 0;
+        tmH = 0;
+        tmM = 0;
+        timerTime1s = 0;
+
+        lcd.clear();
+
+        updDisplayFlag = true;
+    }
+}
+
+void CheckInputLimits(float inpSpeed)
+{
+
+    if (inpSpeed < MIN_SPEED)
+    {
+        Serial.println("Corrected to min: out of range from 0.1 to 6.0 rpm");
+
+        inpSpeed = MIN_SPEED;
+    }
+    else if (inpSpeed > MAX_SPEED)
+    {
+        Serial.println("Corrected to max: out of range from 0.1 to 6.0 rpm");
+
+        inpSpeed = MAX_SPEED;
+    }
+
+    speedRpm = inpSpeed;
+
+    SetMotorIsrDelay();
+    DisplaySerialDebugData();
+
+    updDisplayFlag = true;
+}
+
+void SetMotorIsrDelay()
+{
+    stepDelayUs = (uint32_t)(60000000.0 / (speedRpm * STEPS_PER_REV));
+
+    Timer1.initialize(stepDelayUs);   // Инициализация таймера в микросекундах
+    Timer1.attachInterrupt(MakeStep); // Привязываем функцию к таймеру
+    Timer1.stop();
+}
+
+void MakeStep()
+{
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(STEP_PIN, LOW);
+
+    MakeISR();
+}
+
+void MakeISR()
+{
+    accumulator += stepDelayUs;
+
+    if (accumulator >= 1000000)
+    {
+        updDisplayFlag = true;
+        accumulator -= 1000000;
+    }
+}
+
+void EnableMotor(bool state)
+{
+    state ? digitalWrite(LED_BUILTIN, LOW) : digitalWrite(LED_BUILTIN, HIGH);
+}
+
+void DisplaySerialDebugData()
+{
+    Serial.println("Debug data:");
+    Serial.print("Step delay: ");
+    Serial.print(stepDelayUs);
+    Serial.println(" us");
+    Serial.print("Speed set to: ");
+    Serial.print(speedRpm, 1);
+    Serial.println(" rpm");
+}
+
+void updateDisplayHandle()
+{
+    if (updDisplayFlag)
+    {
+        updDisplayFlag = false;
+
+        UpdateLcdDisplay();
+    }
+}
+
+void UpdateLcdDisplay()
+{
+    switch (displayMode)
+    {
+    case set_mode:
+        UpdateFrase(0, "SETUP RPM:");
+        UpdateFrase(1, "New RPM:>" + (String)speedRpm + "<");
+        UpdateFrase(2, "Rotate ENC to ADJUST");
+        UpdateFrase(3, "Press ENC to LOAD");
+
+        break;
+    case loaded_mode:
+        UpdateFrase(0, "LOADED RPM: " + (String)speedRpm);
+        UpdateFrase(1, "Ready to START");
+        UpdateFrase(2, "Press ENC to SETUP");
+        UpdateFrase(3, "Press BTN to START");
+
+        break;
+    case work_mode:
+        if (timerTime1s >= 60)
+        {
+            timerTime1s = 0;
+            tmM++;
+
+            if (tmM >= 60)
+            {
+                tmM = 0;
+                tmH++;
+
+                if (tmH >= 24)
+                {
+                    tmH = 0;
+                    tmD++;
+
+                    if (tmD > MAX_TIME_H)
+                    {
+                        tmD = 0;
+                        lcd.clear();
+                    }
+                }
+            }
+        }
+
+        UpdateFrase(0, "WORKING MODE");
+        UpdateFrase(1, "RPM = " + (String)speedRpm);
+
+        sprintf(buffer, "Time: %01ud %02u:%02u:%02u", tmD, tmH, tmM, timerTime1s);
+
+        UpdateFrase(2, buffer);
+        UpdateFrase(3, "Press BTN to STOP");
+
+        timerTime1s++;
+
+        break;
+    }
+}
+
+void UpdateFrase(uint8_t posY, String frase)
+{
+    uint8_t middlePosMess = ((19 - frase.length()) / 2) + 1;
+
+    lcd.setCursor(middlePosMess, posY);
+    lcd.print(frase);
+}
+
+void SaveEEPROM()
+{
+    EEPROM.put(0, speedRpm);
+
+    delay(10);
+
+    Serial.println("Save EEPROM data: " + (String)speedRpm);
+}
+
+void LoadEEPROM()
+{
+    EEPROM.get(0, speedRpm);
+
+    delay(10);
+
+    Serial.println("Load EEPROM data: " + (String)speedRpm);
+}
+
+void DisplayIntro()
+{
+    lcd.clear();
+    UpdateFrase(0, "WELCOME");
+    delay(1000);
+    UpdateFrase(2, "STEPPER CONTROLLER");
+    delay(1000);
+    UpdateFrase(3, "v1.0");
+    delay(1000);
+
+    lcd.clear();
+
+    UpdateFrase(1, "Mail:");
+    UpdateFrase(2, "planer.reg@gmail.com");
+
+    delay(2000);
+
+    lcd.clear();
+}
