@@ -131,7 +131,7 @@ void HandleEncoder()
 
         CalculateIsrDelay();
 
-        if (speedRpm > 0.1 && speedRpm < 6.0) // работать только в разрешенном диапазоне
+        if (speedRpm > MIN_SPEED && speedRpm < MAX_SPEED) // работать только в разрешенном диапазоне
         {
             updDisplayFlag = true;
             DisplaySerialDebugData();
@@ -243,9 +243,8 @@ void SetMotorFreeze(bool freeze)
 
 void CalculateIsrDelay()
 {
-    stepDelayUs = (uint32_t)(60000000.0 / (speedRpm * STEPS_PER_REV));
-
-    Timer1.setPeriod(stepDelayUs); // Инициализация таймера в микросекундах
+    stepDelayUs = (uint32_t)(60e6 / (speedRpm * STEPS_PER_REV)); // Упрощение вычисления
+    Timer1.setPeriod(stepDelayUs);                               // Инициализация таймера в микросекундах
 }
 
 void initISR()
@@ -390,9 +389,6 @@ void SaveEEPROM()
 void LoadEEPROM()
 {
     EEPROM.get(0, speedRpm);
-
-    delay(5);
-
     Serial.println("Load EEPROM data: " + strRpm);
 }
 
