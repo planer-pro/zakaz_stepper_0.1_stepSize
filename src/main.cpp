@@ -23,16 +23,17 @@ enum
 #define ENCA_PIN 8      // Пин ENCA
 #define ENCB_PIN 9      // Пин ENCB
 
-#define EN_STEPPER_PIN 7           // Пин для включения шагового двигателя
-#define STEP_PIN 2                 // Пин шага
-#define DIR_PIN 3                  // Пин направления
-#define STEPS_PER_REV 200 * 16     // 3200 шагов/оборот (для микрошага 1/16)
-#define MIN_SPEED 0.1              // Минимальная скорость в об/мин
-#define MAX_SPEED 6.0              // Максимальная скорость в об/мин
-#define MAX_TIME_H 9999            // Максимальное время в часах
-#define MOTOR_FREEZE_ON_STOP false // Удерживание мотора при STOP
-#define MOTOR_FREEZE_ON_PAUSE true // Удерживание мотора при PAUSE
-#define MOTOR_DIRECTION cw         // Направление вращения по часовой стрелке
+#define EN_STEPPER_PIN 7                      // Пин для включения шагового двигателя
+#define STEP_PIN 2                            // Пин шага
+#define DIR_PIN 3                             // Пин направления
+#define MOTOR_REDUCT 5                        // Пин направления
+#define STEPS_PER_REV 200 * 16 * MOTOR_REDUCT // 3200 шагов/оборот (для микрошага 1/16)
+#define MIN_SPEED 0.1                         // Минимальная скорость в об/мин
+#define MAX_SPEED 6.0                         // Максимальная скорость в об/мин
+#define MAX_TIME_H 9999                       // Максимальное время в часах
+#define MOTOR_FREEZE_ON_STOP false            // Удерживание мотора при STOP
+#define MOTOR_FREEZE_ON_PAUSE true            // Удерживание мотора при PAUSE
+#define MOTOR_DIRECTION cw                    // Направление вращения по часовой стрелке
 
 uint8_t displayMode = loaded_mode; // Начальный режим отображения
 uint8_t tmS = 0, tmH = 0, tmM = 0; // Таймерные переменные пройденного времени
@@ -47,7 +48,7 @@ String stTmM = "";
 String stTmS = "";
 
 EncButton eb(ENCA_PIN, ENCB_PIN, MENU_ENC_PIN);
-Button sb(START_BTN_PIN);
+Button sb(START_BTN_PIN, INPUT, HIGH);
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 void HandleEncoder();
@@ -131,7 +132,7 @@ void HandleEncoder()
 
         CalculateIsrDelay();
 
-        if (speedRpm > MIN_SPEED && speedRpm < MAX_SPEED) // работать только в разрешенном диапазоне
+        if (speedRpm >= MIN_SPEED && speedRpm <= MAX_SPEED) // работать только в разрешенном диапазоне
         {
             updDisplayFlag = true;
             DisplaySerialDebugData();
@@ -245,6 +246,7 @@ void CalculateIsrDelay()
 {
     stepDelayUs = (uint32_t)(60e6 / (speedRpm * STEPS_PER_REV)); // Упрощение вычисления
     Timer1.setPeriod(stepDelayUs);                               // Инициализация таймера в микросекундах
+    Timer1.stop();
 }
 
 void initISR()
@@ -260,6 +262,8 @@ void MakeStep()
     digitalWrite(STEP_PIN, HIGH);
     delayMicroseconds(1);
     digitalWrite(STEP_PIN, LOW);
+
+    // digitalWrite(STEP_PIN, !digitalRead(STEP_PIN));
 
     CollectISR_1s();
 }
