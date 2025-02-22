@@ -18,10 +18,10 @@ enum
     pause_mode
 };
 
-#define START_BTN_PIN 8 // Пин для кнопки START
-#define MENU_ENC_PIN 6  // Пин для кнопки ENC
-#define ENCA_PIN 4      // Пин ENCA
-#define ENCB_PIN 5      // Пин ENCB
+#define START_BTN_PIN 5 // Пин для кнопки START
+#define MENU_ENC_PIN 4  // Пин для кнопки ENC
+#define ENCA_PIN 8      // Пин ENCA
+#define ENCB_PIN 9      // Пин ENCB
 
 #define EN_STEPPER_PIN 7           // Пин для включения шагового двигателя
 #define STEP_PIN 2                 // Пин шага
